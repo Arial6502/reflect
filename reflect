@@ -636,15 +636,53 @@ template<typename T>
 inline constexpr bool is_record_like_type_v = std::is_aggregate_v<T> or is_unnamed_record_type_v<T>;
 
 namespace detail {
+
+inline constexpr std::size_t max_arity = 64u;
+
+template<std::size_t> using any_n = any;
+
+template<class T, class> inline constexpr bool initializable_v = false;
+template<class T, std::size_t... Ns>
+inline constexpr bool initializable_v<T, std::index_sequence<Ns...>> = requires { T{any_n<Ns>{}...}; };
+
+// T{any x N}
+template<class T, std::size_t N>
+inline constexpr bool initializable = initializable_v<T, std::make_index_sequence<N>>;
+
+template<class T, class> inline constexpr bool takes_non_base_v = false;
+template<class T, std::size_t... Ns>
+inline constexpr bool takes_non_base_v<T, std::index_sequence<Ns...>> = requires { T{any_n<Ns>{}..., any_except_base_of<T>{}}; };
+
+// T{any x N, x} where x refuses to be a base of T
+template<class T, std::size_t N>
+inline constexpr bool takes_non_base = takes_non_base_v<T, std::make_index_sequence<N>>;
+
+// The largest N that still initializes T. Probing one arity per member nests an instantiation per
+// member, and the contexts add up along a record tree until MSVC gives up with C1202. A fold keeps
+// every probe at the same depth. Taking the last hit rather than the first also handles a type whose
+// leading members cannot be value initialized, where the low arities fail and N itself still works.
+template<class T, std::size_t... Ns>
+[[nodiscard]] constexpr auto arity(std::index_sequence<Ns...>) -> std::size_t {
+  std::size_t found = 0u;
+  ((initializable<T, Ns> ? found = Ns : found), ...);
+  return found;
+}
+
+// Leading slots only a base class can fill.
+template<class T, std::size_t Bases = 0u>
+[[nodiscard]] constexpr auto bases() -> std::size_t {
+  if constexpr (initializable<T, Bases> and not initializable<T, Bases + 1u>) {
+    return Bases;
+  } else if constexpr (Bases < max_arity and initializable<T, Bases> and not takes_non_base<T, Bases>) {
+    return bases<T, Bases + 1u>();
+  } else {
+    return Bases;
+  }
+}
+
 template<class T, std::size_t Bases = 0u, class... Ts> requires std::is_aggregate_v<T>
 [[nodiscard]] constexpr auto size() -> std::size_t {
-  if constexpr (requires { T{Ts{}...}; } and not requires { T{Ts{}..., detail::any{}}; }) {
-    return sizeof...(Ts) - Bases;
-  } else if constexpr (Bases == sizeof...(Ts) and requires { T{Ts{}...}; } and not requires { T{Ts{}..., detail::any_except_base_of<T>{}}; }) {
-    return size<T, Bases + 1u, Ts..., detail::any>();
-  } else {
-    return size<T, Bases, Ts..., detail::any>();
-  }
+  return arity<T>(std::make_index_sequence<max_arity + 1u>{}) - bases<T>();
 }
 } // namespace detail
 
